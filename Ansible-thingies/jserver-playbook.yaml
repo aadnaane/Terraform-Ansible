@@ -1,0 +1,122 @@
+---
+- name: Wait for SSH to be up
+  hosts: all
+  gather_facts: False
+  tasks:
+    - name: Wait 300 seconds for port 22 to become open and contain "OpenSSH"
+      wait_for:
+        port: 22
+        host: '{{ (ansible_ssh_host|default(ansible_host))|default(inventory_hostname) }}'
+        search_regex: OpenSSH
+        delay: 10
+      connection: local
+
+- name: Setup Payara Crap
+  hosts: all
+  vars_files:
+    - vars.yaml
+    - jvars.yaml
+
+  tasks:
+    - name: Update all the packages to the latest version
+      become: yes
+      apt:
+        name: "*"
+        state: latest
+    - name: Install ACL
+      become: yes
+      become_user: root
+      apt:
+        name: acl
+        state: latest
+
+    - name: Install Python 3
+      become: yes
+      become_user: root
+      apt:
+        name: python3
+        state: latest
+
+    - name: Install pip
+      become: yes
+      become_user: root
+      apt:
+        name: python3-pip
+        state: latest
+        update_cache: yes
+        force_apt_get: yes
+
+
+    - name: Install pyOpenSSL
+      become: yes
+      become_user: root
+      pip:
+        name: pyOpenSSL
+        state: latest
+        update_cache: yes
+
+    - name: Install Java 8
+      become: yes
+      become_user: root
+      apt:
+        name: openjdk-8-jdk
+        state: latest
+
+    - name: Make java 8 default
+      become: yes
+      become_user: root
+      community.general.alternatives:
+        name: java
+        path: /usr/lib/jvm/java-8-openjdk-amd64/jre/bin/java
+
+    - name: Install Unzip tool
+      become: yes
+      become_user: root
+      apt:
+        name: unzip
+        state: latest
+
+    # - name: upload & unarchive payara installation
+    #   ansible.builtin.unarchive:
+    #     src: /root/payara-5.2022.1.zip
+    #     dest: /home/azureuser
+
+    - name: Creation of SSlCert folder
+      file:
+        path: ~/SSLCert
+        state: directory
+
+    - name: Generate an OpenSSL private key
+      openssl_privatekey:
+        path: "~/SSLCert/privkey.pem"
+        size: "{{ key_size }}"
+        type: "{{ key_type }}"
+        backup: yes
+
+    - name: Generate an OpenSSL Certificate Signing Request with Subject information
+      openssl_csr:
+        path: "~/SSLCert/cert.csr"
+        privatekey_path: "~/SSLCert/privkey.pem"
+        country_name: "{{ country_name }}"
+        organization_name: "{{ organization_name }}"
+        email_address: "{{ email_address }}"
+        common_name: "{{ server_hostname }}"
+
+    - name: Generate a Self Signed OpenSSL certificate
+      openssl_certificate:
+        path: "~/SSLCert/cert.pem"
+        privatekey_path: "~/SSLCert/privkey.pem"
+        csr_path: "~/SSLCert/cert.csr"
+        provider: selfsigned
+
+    - name: Generate PKCS#12 file
+      community.crypto.openssl_pkcs12:
+        action: export
+        path: ~/SSLCert/ansible.p12
+        friendly_name: raclette
+        privatekey_path: ~/SSLCert/privkey.pem
+        certificate_path: ~/SSLCert/cert.pem
+        state: present
+
+    - name: Import a pkcs12 keystore with a specified alias, create it if it doesn't exist
+      command: keytool -importkeystore -destkeystore keystore.jks -srckeystore ~/SSLCert/ansible.p12 -srcstoretype PKCS12 -alias mydomain_certificate

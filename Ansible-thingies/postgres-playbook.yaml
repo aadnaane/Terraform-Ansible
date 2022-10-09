@@ -1,0 +1,114 @@
+---
+- name: Wait for SSH to be up
+  hosts: all
+  gather_facts: False
+  tasks:
+    - name: Wait 300 seconds for port 22 to become open and contain "OpenSSH"
+      wait_for:
+        port: 22
+        host: '{{ (ansible_ssh_host|default(ansible_host))|default(inventory_hostname) }}'
+        search_regex: OpenSSH
+        delay: 10
+      connection: local
+
+- name: Postgres Setup
+  hosts: all
+  vars_files:
+    - vars.yaml
+
+  tasks:
+    - name: "Update all the packages to the latest version"
+      become: yes
+      apt:
+        name: "*"
+        state: latest
+
+    - name: Install ACL
+      become: yes
+      become_user: root
+      apt:
+        name: acl
+        state: latest
+
+    - name: Install PostgreSQL packages
+      apt: name={{ item }} state=present
+      with_items:
+        - postgresql-12
+        - postgresql-contrib-12
+
+    - name: Install Python packages
+      become: yes
+      become_user: root
+      apt: "name={{ item }}  state=present"
+      with_items:
+        - python3
+        - psycopg2
+    - name: Find out if PostgreSQL is initialized
+      become: yes
+      ansible.builtin.stat:
+        path: /var/lib/pgsql/data/pg_hba.conf
+      register: postgres_data
+
+    - name: "Start and enable services"
+      become: yes
+      service: "name={{ item }} state=started enabled=yes"
+      with_items:
+        - postgresql
+
+    - name: Create database
+      postgresql_db:
+        state: present
+        name: "{{ db_name }}"
+      become: yes
+      become_user: postgres
+
+    - name: Create a new user
+      postgresql_user:
+        state: present
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+      become: yes
+      become_user: postgres
+
+    - name: Grant proper priviliges to the user
+      postgresql_privs:
+        type: database
+        database: "{{ db_name }}"
+        roles: "{{ db_user }}"
+        grant_option: no
+        privs: all
+      become: yes
+      become_user: postgres
+
+    - name: Access postgresql server
+      become: yes
+      become_user: root
+      replace:
+        path: /etc/postgresql/12/main/postgresql.conf
+        regexp: '^#listen_addresses.*'
+        replace: listen_addresses = '*'
+
+    - name: Allowing incoming clients to connect
+      become: yes
+      become_user: root
+      ansible.builtin.lineinfile:
+        path: /etc/postgresql/12/main/pg_hba.conf
+        line: host all all 0.0.0.0/0 md5
+        create: yes
+      notify:
+      - Restart postgresql service
+
+    - name: Generate Self Signed OpenSSL certificate
+      community.crypto.x509_certificate:
+        path: /etc/ssl/crt/ansible.com.crt
+        privatekey_path: /etc/ssl/private/ansible.com.pem
+        csr_path: /etc/ssl/csr/ansible.com.csr
+        provider: selfsigned
+    
+  handlers:
+    - name: Restart postgresql service
+      become: yes
+      become_user: root
+      ansible.builtin.service:
+        name: postgresql
+        state: restarted
